@@ -146,6 +146,7 @@ languages = [
     "OMNeT++ NED",
     "OpenSCAD",
     "OpenTofu",
+    "OpenTofu Vars",
     "Org",
     "Pact",
     "Path of Exile Filter",
