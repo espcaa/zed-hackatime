@@ -240,14 +240,14 @@ impl zed::Extension for WakatimeExtension {
 
         let lsp_settings = zed::settings::LspSettings::for_worktree("wakatime", worktree)?;
 
-        // check if enhanced_tracking=true in the lsp settings
+        // check if strict_tracking=true in the lsp settings
         if let Some(settings) = &lsp_settings.settings {
             if settings
-                .get("enhanced_tracking")
+                .get("strict_tracking")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                args.push("--enhanced-tracking".to_string());
+                args.push("--strict-tracking".to_string());
             }
         }
 
