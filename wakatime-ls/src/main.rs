@@ -50,7 +50,6 @@ fn extract_uri_string(uri: &url::Url) -> String {
 
 impl WakatimeLanguageServer {
     async fn send(&self, event: Event) {
-        // strict mode enabled: only send heartbeats that have lineno and cursor_pos
         if event.lineno.is_none() || event.cursor_pos.is_none() {
             return;
         }
@@ -202,7 +201,7 @@ impl LanguageServer for WakatimeLanguageServer {
         self.client
             .log_message(
                 MessageType::INFO,
-                "Running in strict mode; only tracking events with line and cursor position will be sent.",
+                "Hackatime version; only tracking events with line and cursor position will be sent.",
             )
             .await;
     }
