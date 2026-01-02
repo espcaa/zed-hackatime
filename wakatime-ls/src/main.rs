@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Local, TimeDelta};
@@ -12,6 +12,9 @@ use tower_lsp::{jsonrpc::Result, lsp_types::*, Client, LanguageServer, LspServic
 struct Settings {
     api_key: Option<String>,
     api_url: Option<String>,
+    metrics: Option<bool>,
+    debug: Option<bool>,
+    heartbeat_interval: Option<i64>,
 }
 
 #[derive(Default, Debug)]
@@ -50,13 +53,22 @@ fn extract_uri_string(uri: &url::Url) -> String {
 
 impl WakatimeLanguageServer {
     async fn send(&self, event: Event) {
+        // strict but then why are we doing save & close events :sob:
+        // TODO: figure out a way to track data for save & close events, keeping them here for now ig
         if event.lineno.is_none() || event.cursor_pos.is_none() {
             return;
         }
 
-        // if is_write is false, and file has not changed since last heartbeat,
-        // and less than 2 minutes since last heartbeat, and do nothing
-        const INTERVAL: TimeDelta = TimeDelta::minutes(2);
+        // if less than 2 minutes (if heartbeat-interval is not set, else heartbeat-interval*second) has passed, skip sending heartbeat
+
+        let interval: TimeDelta = {
+            let settings = self.settings.load();
+            if let Some(heartbeat_interval) = settings.heartbeat_interval {
+                TimeDelta::seconds(heartbeat_interval as i64)
+            } else {
+                TimeDelta::minutes(2)
+            }
+        };
 
         let mut current_file = self.current_file.lock().await;
         let now = Local::now();
@@ -70,27 +82,38 @@ impl WakatimeLanguageServer {
             .await;
 
         if event.uri == current_file.uri
-            && now - current_file.timestamp < INTERVAL
+            && now - current_file.timestamp < interval
             && !event.is_write
         {
             return;
         }
+
+        // get the line count of the file
+        let line_count = fs::read_to_string(&event.uri)
+            .map(|content| content.lines().count() as u64)
+            .unwrap_or(0);
 
         let mut command = TokioCommand::new(self.wakatime_path.as_str());
 
         command
             .arg("--time")
             .arg((now.timestamp() as f64).to_string())
-            .arg("--write")
-            .arg(event.is_write.to_string())
             .arg("--entity")
             .arg(event.uri.as_str());
+
+        if event.is_write {
+            command.arg("--write");
+        }
 
         if !self.platform.load().is_empty() {
             command.arg("--plugin").arg(self.platform.load().as_str());
         }
 
         let settings = self.settings.load();
+
+        if settings.metrics == Some(true) {
+            command.arg("--metrics");
+        }
 
         if let Some(ref key) = settings.api_key {
             command.arg("--key").arg(key);
@@ -106,12 +129,22 @@ impl WakatimeLanguageServer {
             command.arg("--guess-language");
         }
 
+        if let Some(ref debug) = settings.debug {
+            if *debug {
+                command.arg("--verbose");
+            }
+        }
+
         if let Some(lineno) = event.lineno {
             command.arg("--lineno").arg(lineno.to_string());
         }
 
         if let Some(cursor_pos) = event.cursor_pos {
             command.arg("--cursorpos").arg(cursor_pos.to_string());
+        }
+
+        if line_count > 0 {
+            command.arg("--lines-in-file").arg(line_count.to_string());
         }
 
         self.client
@@ -163,6 +196,8 @@ impl LanguageServer for WakatimeLanguageServer {
 
             let mut settings = Settings::default();
 
+            // check if the plugin is disabled
+
             if let Some(api_url) = initialization_options
                 .get("api-url")
                 .and_then(Value::as_str)
@@ -177,6 +212,17 @@ impl LanguageServer for WakatimeLanguageServer {
                 settings.api_key = Some(api_key.to_string());
             }
 
+            if let Some(metrics) = initialization_options
+                .get("metrics")
+                .and_then(Value::as_bool)
+            {
+                settings.metrics = Some(metrics);
+            }
+
+            if let Some(debug) = initialization_options.get("debug").and_then(Value::as_bool) {
+                settings.debug = Some(debug);
+            }
+
             self.settings.swap(Arc::from(settings));
         }
 
@@ -186,8 +232,13 @@ impl LanguageServer for WakatimeLanguageServer {
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
                 )),
                 ..Default::default()
             },
@@ -211,11 +262,13 @@ impl LanguageServer for WakatimeLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let file_uri = extract_uri_string(&params.text_document.uri);
+
         let event = Event {
-            uri: extract_uri_string(&params.text_document.uri),
+            uri: file_uri,
             is_write: false,
+            language: Some(params.text_document.language_id),
             lineno: None,
-            language: Some(params.text_document.language_id.clone()),
             cursor_pos: None,
         };
 
@@ -223,8 +276,10 @@ impl LanguageServer for WakatimeLanguageServer {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let file_uri = extract_uri_string(&params.text_document.uri);
+
         let event = Event {
-            uri: extract_uri_string(&params.text_document.uri),
+            uri: file_uri,
             is_write: false,
             lineno: params
                 .content_changes
@@ -243,12 +298,28 @@ impl LanguageServer for WakatimeLanguageServer {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let file_uri = extract_uri_string(&params.text_document.uri);
+
         let event = Event {
-            uri: extract_uri_string(&params.text_document.uri),
+            uri: file_uri,
             is_write: true,
-            lineno: None,
             language: None,
+            lineno: None,
             cursor_pos: None,
+        };
+
+        self.send(event).await;
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let file_uri = extract_uri_string(&params.text_document.uri);
+
+        let event = Event {
+            uri: file_uri,
+            is_write: false,
+            language: None,
+            lineno: Some(0),
+            cursor_pos: Some(0),
         };
 
         self.send(event).await;
