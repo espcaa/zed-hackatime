@@ -292,8 +292,13 @@ impl LanguageServer for WakatimeLanguageServer {
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
                 )),
                 ..Default::default()
             },
@@ -302,7 +307,7 @@ impl LanguageServer for WakatimeLanguageServer {
 
     async fn initialized(&self, _params: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "Wakatime language server initialized")
+            .log_message(MessageType::INFO, "Hackatime language server initialized")
             .await;
         self.client
             .log_message(
@@ -362,12 +367,6 @@ impl LanguageServer for WakatimeLanguageServer {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "did_change triggered")
-            .await;
-
-        // log it
-
         self.client
             .log_message(
                 MessageType::INFO,
