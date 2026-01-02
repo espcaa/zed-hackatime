@@ -79,18 +79,6 @@ impl WakatimeLanguageServer {
             return;
         }
 
-        let interval: TimeDelta = {
-            let settings = self.settings.load();
-            if let Some(heartbeat_interval) = settings.heartbeat_interval {
-                TimeDelta::seconds(heartbeat_interval as i64)
-            } else {
-                TimeDelta::minutes(2)
-            }
-        };
-
-        let mut current_file = self.current_file.lock().await;
-        let now = Local::now();
-
         #[cfg(debug_assertions)]
         self.client
             .log_message(
@@ -103,10 +91,43 @@ impl WakatimeLanguageServer {
         // file_changed -> send immediately ( same )
         // else -> check interval, if now - last_sent > interval, send it and update timestamp
 
-        if event.is_write || event.file_changed {
-            self.push_heartbeat(event, false).await;
-        } else if now - current_file.timestamp > interval {
-            self.push_heartbeat(event, true).await;
+        let (last_timestamp, interval) = {
+            let settings = self.settings.load();
+            let interval = if let Some(heartbeat_interval) = settings.heartbeat_interval {
+                TimeDelta::seconds(heartbeat_interval as i64)
+            } else {
+                TimeDelta::minutes(2)
+            };
+
+            let cf = self.current_file.lock().await;
+            (cf.timestamp, interval)
+        };
+
+        let now = Local::now();
+
+        #[cfg(debug_assertions)]
+        self.client
+            .log_message(
+                MessageType::LOG,
+                format!("Wakatime language server send called, event: {event:?}"),
+            )
+            .await;
+
+        let should_send = event.is_write || event.file_changed || now - last_timestamp > interval;
+
+        if should_send {
+            #[cfg(debug_assertions)]
+            self.client
+                .log_message(
+                    MessageType::LOG,
+                    format!(
+                        "Wakatime language server: sending heartbeat for file: {}, last sent at {}, interval reached",
+                        event.uri, last_timestamp
+                    ),
+                )
+                .await;
+            let should_update_timestamp = !event.is_write && !event.file_changed;
+            self.push_heartbeat(event, should_update_timestamp).await;
         } else {
             #[cfg(debug_assertions)]
             self.client
@@ -114,7 +135,7 @@ impl WakatimeLanguageServer {
                     MessageType::LOG,
                     format!(
                         "Wakatime language server: skipping heartbeat for file: {}, last sent at {}, interval not reached",
-                        event.uri, current_file.timestamp
+                        event.uri, last_timestamp
                     ),
                 )
                 .await;
@@ -123,7 +144,6 @@ impl WakatimeLanguageServer {
     }
 
     async fn push_heartbeat(&self, event: Event, update_timestamp: bool) {
-        let mut current_file = self.current_file.lock().await;
         let now = Local::now();
 
         // get the line count of the file
@@ -205,7 +225,8 @@ impl WakatimeLanguageServer {
         };
 
         if update_timestamp {
-            current_file.timestamp = now;
+            let mut cf = self.current_file.lock().await;
+            cf.timestamp = now;
         }
     }
 }
@@ -223,7 +244,7 @@ impl LanguageServer for WakatimeLanguageServer {
             }
 
             platform.push(' ');
-            platform.push_str(format!("Zed-wakatime/{}", env!("CARGO_PKG_VERSION")).as_str());
+            platform.push_str(format!("Zed-hackatime/{}", env!("CARGO_PKG_VERSION")).as_str());
 
             self.platform.store(Arc::new(platform));
         }
@@ -297,45 +318,66 @@ impl LanguageServer for WakatimeLanguageServer {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let file_uri = extract_uri_string(&params.text_document.uri);
-        let mut file_changed = false;
-        if file_uri != self.current_file.lock().await.uri {
-            file_changed = true;
-        }
+        let file_changed = {
+            let cf = self.current_file.lock().await;
+            file_uri != cf.uri
+        };
+
         let event = Event {
-            uri: file_uri,
+            uri: file_uri.clone(),
             is_write: false,
             lineno: params
                 .content_changes
                 .first()
-                .map_or_else(|| None, |c| c.range)
-                .map(|c| c.start.line as u64),
+                .and_then(|c| c.range)
+                .map(|r| r.start.line as u64),
             language: None,
             cursor_pos: params
                 .content_changes
                 .first()
-                .map_or_else(|| None, |c| c.range)
-                .map(|c| c.start.character as u64),
+                .and_then(|c| c.range)
+                .map(|r| r.start.character as u64),
             file_changed,
         };
 
         // add it to the cache
-        let mut cache = self.file_cache.lock().await;
 
-        cache.entries.insert(
-            event.uri.clone(),
-            FileCacheEntry {
-                lineno: event.lineno.unwrap_or(0),
-                cursor_pos: event.cursor_pos.unwrap_or(0),
-            },
-        );
+        {
+            let mut cache = self.file_cache.lock().await;
+            cache.entries.insert(
+                file_uri.clone(),
+                FileCacheEntry {
+                    lineno: event.lineno.unwrap_or(0),
+                    cursor_pos: event.cursor_pos.unwrap_or(0),
+                },
+            );
+        }
 
-        // change current_file to this file
-        self.current_file.lock().await.uri = event.uri.clone();
+        {
+            let mut cf = self.current_file.lock().await;
+            cf.uri = file_uri.clone();
+        }
 
         self.send(event).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        self.client
+            .log_message(MessageType::INFO, "did_change triggered")
+            .await;
+
+        // log it
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Wakatime language server: file saved: {}",
+                    params.text_document.uri
+                ),
+            )
+            .await;
+
         let file_uri = extract_uri_string(&params.text_document.uri);
 
         // check if the file is in the cache
@@ -359,7 +401,7 @@ impl LanguageServer for WakatimeLanguageServer {
         }
 
         let event = Event {
-            uri: file_uri,
+            uri: file_uri.clone(),
             is_write: true,
             lineno,
             language: None,
@@ -367,7 +409,10 @@ impl LanguageServer for WakatimeLanguageServer {
             file_changed: false,
         };
 
-        self.current_file.lock().await.uri = event.uri.clone();
+        {
+            let mut cf = self.current_file.lock().await;
+            cf.uri = file_uri.clone();
+        }
 
         self.send(event).await;
     }
