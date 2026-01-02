@@ -136,13 +136,15 @@ impl WakatimeLanguageServer {
         command
             .arg("--time")
             .arg((now.timestamp() as f64).to_string())
-            .arg("--write")
-            .arg(event.is_write.to_string())
             .arg("--entity")
             .arg(event.uri.as_str());
 
         if !self.platform.load().is_empty() {
             command.arg("--plugin").arg(self.platform.load().as_str());
+        }
+
+        if event.is_write {
+            command.arg("--write");
         }
 
         let settings = self.settings.load();
