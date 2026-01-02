@@ -1,7 +1,7 @@
 id = "hackatime"
 name = "hackatime"
 description = "Wakatime extension fork to improve hackatime support."
-version = "0.3.0"
+version = "0.3.1"
 schema_version = 1
 authors = ["Alan Hamlett <alan@wakatime.com>", "bestgopher <84328409@qq.com>", "alice <alice@hackclub.cc"]
 repository = "https://github.com/espcaa/zed-hackatime"
