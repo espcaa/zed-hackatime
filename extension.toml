@@ -6,8 +6,8 @@ schema_version = 1
 authors = ["Alan Hamlett <alan@wakatime.com>", "bestgopher <84328409@qq.com>", "alice <alice@hackclub.cc"]
 repository = "https://github.com/espcaa/zed-hackatime"
 
-[language_servers.wakatime]
-name = "wakatime"
+[language_servers.hackatime]
+name = "hackatime"
 languages = [
     "ActionScript",
     "Ada",
