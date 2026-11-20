@@ -102,7 +102,6 @@ impl WakatimeExtension {
     }
 
     /// Reads the latest release tag from the redirect at github.com/<repo>/releases/latest.
-    /// Unlike api.github.com, this is not limited to 60 unauthenticated requests an hour.
     fn latest_version(repo: &str) -> Result<String> {
         let response = HttpRequest::builder()
             .method(HttpMethod::Head)
@@ -128,7 +127,7 @@ impl WakatimeExtension {
         let target_triple = self.target_triple(binary)?;
         let asset_name = format!("{target_triple}.zip");
 
-        // If GitHub can't be reached, keep using a binary downloaded earlier.
+        // if GitHub can't be reached, just use the binary we have on disk (if we have one)
         let version = match Self::latest_version(repo) {
             Ok(version) => version,
             Err(err) => return Self::find_downloaded(binary, &target_triple).ok_or(err),
