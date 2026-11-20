@@ -3,7 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use zed_extension_api::{self as zed, Command, LanguageServerId, Result, Worktree};
+use zed_extension_api::{
+    self as zed,
+    http_client::{HttpMethod, HttpRequest, RedirectPolicy},
+    Command, LanguageServerId, Result, Worktree,
+};
 
 struct WakatimeExtension {
     cached_ls_binary_path: Option<PathBuf>,
@@ -82,30 +86,57 @@ impl WakatimeExtension {
         })
     }
 
+    fn find_downloaded(binary: &str, target_triple: &str) -> Option<PathBuf> {
+        let file_name = if binary == "wakatime-cli" {
+            executable_name(target_triple)
+        } else {
+            executable_name(binary)
+        };
+        let version_prefix = format!("{binary}-");
+        fs::read_dir(".")
+            .ok()?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&version_prefix))
+            .map(|name| Path::new(&name).join(&file_name))
+            .find(|path| fs::metadata(path).is_ok_and(|stat| stat.is_file()))
+    }
+
+    /// Reads the latest release tag from the redirect at github.com/<repo>/releases/latest.
+    /// Unlike api.github.com, this is not limited to 60 unauthenticated requests an hour.
+    fn latest_version(repo: &str) -> Result<String> {
+        let response = HttpRequest::builder()
+            .method(HttpMethod::Head)
+            .url(format!("https://github.com/{repo}/releases/latest"))
+            .redirect_policy(RedirectPolicy::NoFollow)
+            .build()?
+            .fetch()?;
+        response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+            .and_then(|(_, location)| location.split("/releases/tag/").nth(1))
+            .map(str::to_string)
+            .ok_or_else(|| format!("no latest release found for {repo}"))
+    }
+
     fn download(
         &self,
         language_server_id: &LanguageServerId,
         binary: &str,
         repo: &str,
     ) -> Result<PathBuf> {
-        let release = zed::latest_github_release(
-            repo,
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
-
         let target_triple = self.target_triple(binary)?;
-
         let asset_name = format!("{target_triple}.zip");
-        let asset = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == asset_name)
-            .ok_or_else(|| format!("no asset found matching {asset_name:?}"))?;
 
-        let version_dir = format!("{binary}-{}", release.version);
+        // If GitHub can't be reached, keep using a binary downloaded earlier.
+        let version = match Self::latest_version(repo) {
+            Ok(version) => version,
+            Err(err) => return Self::find_downloaded(binary, &target_triple).ok_or(err),
+        };
+        let download_url =
+            format!("https://github.com/{repo}/releases/download/{version}/{asset_name}");
+
+        let version_dir = format!("{binary}-{version}");
         let binary_path = if binary == "wakatime-cli" {
             Path::new(&version_dir).join(executable_name(&target_triple))
         } else {
@@ -118,12 +149,13 @@ impl WakatimeExtension {
                 &zed::LanguageServerInstallationStatus::Downloading,
             );
 
-            zed::download_file(
-                &asset.download_url,
-                &version_dir,
-                zed::DownloadedFileType::Zip,
-            )
-            .map_err(|err| format!("failed to download file: {err}"))?;
+            let download =
+                zed::download_file(&download_url, &version_dir, zed::DownloadedFileType::Zip)
+                    .map_err(|err| format!("failed to download file: {err}"));
+            // A new release can be tagged before its assets finish uploading.
+            if let Err(err) = download {
+                return Self::find_downloaded(binary, &target_triple).ok_or(err);
+            }
 
             let entries = fs::read_dir(".")
                 .map_err(|err| format!("failed to list working directory {err}"))?;
